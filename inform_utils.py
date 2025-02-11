@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timedelta
 from fnmatch import fnmatch
 from typing import Iterable
-
+import xarray as xr
 
 def find_flight_fnames(dir_path: str) -> list[str]:
     """
@@ -39,9 +39,9 @@ def find_nc_fnames(dir_path: str) -> list[str]:
         nudg_path = [file for file in nc_paths if ".hs." in file]
         free_path = [file for file in nc_paths if ".h0." in file]
         # save dictionary with the paths for 
-        model_paths = {'Free': free_path,'Nudg': nudg_path}
+        paths = {'Free': free_path,'Nudg': nudg_path}
         
-    return model_paths
+    return paths
 
 def open_nc(flight_paths: str) -> netCDF4._netCDF4.Dataset:
     """
@@ -51,14 +51,13 @@ def open_nc(flight_paths: str) -> netCDF4._netCDF4.Dataset:
 
     :return: Returns xr.open_dataset object.
     """
-
     fp_path = path.Path(flight_paths)
     if not fp_path.is_file():
         raise FileNotFoundError('testing excptions')
 
     return xr.open_dataset(flight_paths)
 
-def read_flight_nc_1hz(nc: xr.open_dataset, read_vars: list[str] = vars_to_read) -> pd.DataFrame:
+def read_flight_nc_1hz(nc: xr.open_dataset, read_vars) -> pd.DataFrame:
     """
     read_flight_nc reads a set of variables into memory.
 
@@ -94,7 +93,7 @@ def read_flight_nc_1hz(nc: xr.open_dataset, read_vars: list[str] = vars_to_read)
     # concatenate the list of dataframes into a single dataframe and return it
     return pd.concat(data, axis=1, ignore_index=False)
 
-def read_flight_nc_25hz(nc: xr.open_dataset, read_vars: list[str] = vars_to_read) -> pd.DataFrame:
+def read_flight_nc_25hz(nc: xr.open_dataset, read_vars) -> pd.DataFrame:
     """
     read_flight_nc reads a set of variables into memory.
 
@@ -167,7 +166,7 @@ class flight_obj:
     self.rate: str; a string indicating the rate of the data read in
     self.read_vars: list[str]; list of the vars that were successfully read in
     """
-    def __init__(self, file_path: str, read_vars: list[str] = vars_to_read):
+    def __init__(self, file_path: str, read_vars):
         # assign input vars
         self.file_path = path.Path(file_path)
         self.read_vars_attempted = read_vars
@@ -191,4 +190,4 @@ class flight_obj:
         self.read_vars = list(self.df.keys())
 
 # if __name__ == "__main__":
-#     inform_utils()
+#     inform_utils.()

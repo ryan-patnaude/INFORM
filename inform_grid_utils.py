@@ -9,23 +9,32 @@ from typing import Iterable
 import xarray as xr
 import matplotlib.pyplot as plt
 from scipy.stats import norm
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.animation import FuncAnimation  
 
 def grid_flight_dat(cesm: xr.open_dataset, cesm_dat: xr.open_dataset, df: pd.DataFrame, air: xr.open_dataset) -> dict:    
     """
     Grids aircraft data and scales it onto a 3D grid.
-    
-    This function maps aircraft data onto a predefined grid based on CESM data,
+
+    This function maps aircraft data onto a predefined grid based on CESM data, 
     using the region defined by the bounds of the flight data.
-    
+
     NOTE: A low-rate, 1 Hz, flight data file is assumed.
-    
-    :param gv_dat: A dataset object containing aircraft data (e.g., LATC, LONC, U, V, T).
-    :param cesm_dat: A dataset object containing CESM data (e.g., lat, lon, lev).
-    :param grid: A 3D numpy array representing the grid, typically created based on flight region.
-    :param bounds: A dictionary containing the latitude, longitude, and altitude bounds for the grid.
-    
-    :return: A dictionary containing latitude (lats), longitude (lons), and pressure altitude (palts)
-             for grid cells where data is present.
+
+    Args:
+        cesm (Any): Free-run CESM dataset.
+        cesm_dat (Any): Nudged CESM dataset.
+        df (pd.DataFrame): Aircraft dataset (includes LATC, LONC, U, V, T, etc.).
+        air (Any): Aircraft dataset in xarray format.
+
+    Returns:
+        tuple[dict, np.ndarray, dict]: 
+            - A dictionary containing time, latitude, longitude, and pressure altitude for grid cells with data.
+            - A 3D numpy array representing the grid.
+            - A dictionary containing latitude, longitude, and altitude bounds.
     """
 
     def make_grid(cesm: xr.open_dataset, air: xr.open_dataset) -> tuple[np.ndarray, dict[str, list[int]]]:
@@ -78,7 +87,7 @@ def grid_flight_dat(cesm: xr.open_dataset, cesm_dat: xr.open_dataset, df: pd.Dat
         grid = np.zeros(grid_shape, dtype=int)
         return grid, bounds
     
-    grid, bounds = make_grid(cesm,nc)
+    grid, bounds = make_grid(cesm,air)
 
     def filt_model_dims(cesm_dat: xr.open_dataset,df: pd.DataFrame):
         """
@@ -247,3 +256,79 @@ def grid_flight_dat(cesm: xr.open_dataset, cesm_dat: xr.open_dataset, df: pd.Dat
                     }
         
     return grid_dict, grid, bounds
+
+# Assuming grid and bounds are already defined
+
+# grid, bounds = inform_grid_util.grid_flight_dat(cesm_fr, nc)
+def plot_grid(free,bounds,air_nc):
+
+    # Define the lat/lon boundaries of the square
+    lat_min, lat_max = float(free.lat[bounds['lat'][0]-1]), float(free.lat[bounds['lat'][1]+2])  # Latitude range
+    lon_min, lon_max = float(free.lon[bounds['lon'][0]-1]), float(free.lon[bounds['lon'][1]+2])  # Longitude range
+
+    # Create a plot with Cartopy's PlateCarree projection
+    fig, ax = plt.subplots(subplot_kw={'projection': ccrs.PlateCarree()}, figsize=(10, 6))
+
+    # Add global map features
+    ax.add_feature(cfeature.LAND, edgecolor='black', color='lightgray')
+    ax.add_feature(cfeature.BORDERS, linestyle=':')
+    ax.set_global()
+    ax.coastlines()
+
+    # Plot the flight track with proper transformation
+    ax.plot(air_nc.LONC, air_nc.LATC, label='flight track', color='black', transform=ccrs.PlateCarree())
+
+    # Plot the square of coordinates
+    square_lats = [lat_min, lat_min, lat_max, lat_max, lat_min]
+    square_lons = [lon_min, lon_max, lon_max, lon_min, lon_min]
+    ax.plot(square_lons, square_lats, color='red', linewidth=2,label='model domain', transform=ccrs.PlateCarree())
+
+    # Set the extent to zoom in on the region around the square
+    buffer = 45  # Degrees to add around the square for some padding
+    # Ensure that the longitude wrapping is handled correctly
+    lon_min_zoom = max(lon_min - buffer, -180)
+    lon_max_zoom = min(lon_max + buffer, 180)
+
+    # Set the extent for zooming in on the region around the square
+    ax.set_extent([lon_min_zoom, lon_max_zoom, lat_min - buffer, lat_max + buffer], crs=ccrs.PlateCarree())
+
+    # Set title
+    ax.set_title('Map with aircraft grid location')
+    ax.legend()
+    # Show plot
+    plt.show()
+
+
+def plot_3d_track(grid_data,air_nc):
+    # grid_data = grid_flight_dat(cesm_fr, cesm_ndg, df, nc)
+    # grid_data = grid_dict
+    # Create a figure
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Scatter plot
+    sc = ax.scatter(grid_data['lons'], grid_data['lats'], grid_data['palts'], c=grid_data['mean_t'], cmap='viridis', marker='^',label='grid-mean values',s=100)
+    # Invert the Z-axis
+    ax.scatter(air_nc.LONC, air_nc.LATC, air_nc.PSXC, c=air_nc.ATX, label='3D Flight track',s=12)
+    ax.invert_zaxis()
+
+    ax.set_xlabel('latitude (deg)')
+    ax.set_ylabel('longitude (deg)')
+    ax.set_zlabel('pressure alt (hPa)') 
+
+    ax.legend()
+    # # Color bar to show the mapping of color to the fourth dimension
+    plt.colorbar(sc, label='Mean Temperature (°C)')
+
+    # Animation function to rotate the view
+    def rotate(angle):
+        ax.view_init(elev=30, azim=angle)
+
+    # Create animation
+    ani = FuncAnimation(fig, rotate, frames=np.arange(-180, 360, 20), interval=100)
+
+    # Show the animation in Jupyter Notebook
+    from IPython.display import HTML
+    HTML(ani.to_jshtml())
+
+    plt.show()
