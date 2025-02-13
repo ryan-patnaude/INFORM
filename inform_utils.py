@@ -189,5 +189,45 @@ class flight_obj:
             self.rate = "1Hz"
         self.read_vars = list(self.df.keys())
 
+
+# Function to read in all the relevant variables from the NSF aircraft datasets
+def read_vars(nc):
+
+    var_list = nc.data_vars
+    time = 'Time'
+    # Spatial variables
+    lat, lon, alt = 'GGLAT', 'GGLON', 'GGALT'
+    
+    # state variables
+    temp = 'ATX'
+    dwpt = 'DPXC'
+    u = 'UIC' if 'UIC' in var_list else 'UIX'
+    v = 'VIC' if 'VIC' in var_list else 'VIX'
+    w = 'WIC' if 'WIC' in var_list else 'WIX'
+    p = 'PSXC'
+    ew = 'EWX'
+    rh = 'RHUM'
+    vars_to_read = [time, lat, lon, alt, temp, dwpt, u,  w, p, ew, rh]
+
+    # Thermodynamic data
+    if any('THETA' in var for var in var_list): 
+        theta_vars = [var for var in var_list if 'THETA' in var]
+        vars_to_read.extend(theta_vars)
+    # Cloud microphysical
+    if any('CONC' in var for var in var_list): # pull concentration ata
+        conc_vars = [var for var in var_list if 'CONC' in var and ('_2' not in var and 'R_' not in var)]
+        vars_to_read.extend(conc_vars)
+    if any('PLW' in var for var in var_list): # Liquid/Ice water contents
+        # v = [var for var in var_list if '2' not in var]
+        wc_vars = [var for var in var_list if 'PLW' in var and '_2' not in var]
+        vars_to_read.extend(wc_vars)
+    # Aerosol data
+    if any('UHSAS' in var for var in var_list): # pull UHSAS aerosol data, single column only. Not including size distributions ... yet
+        uhsas_var = [var for var in list if ('UHSAS' in var or 'CONCU' in var) and ('AU' not in var and 'UD' not in var and 'CUH' not in var)]
+        uhsas_cells = var_list['CUHSAS_LWII'].CellSizes
+        vars_to_read.extend(uhsas_var)
+    
+    return vars_to_read
+
 # if __name__ == "__main__":
 #     inform_utils.()

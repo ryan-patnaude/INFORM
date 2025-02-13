@@ -1,11 +1,8 @@
-import netCDF4
 import pathlib as path
 import pandas as pd
 import numpy as np
 import os
 from datetime import datetime, timedelta
-from fnmatch import fnmatch
-from typing import Iterable
 import xarray as xr
 import matplotlib.pyplot as plt
 from scipy.stats import norm
@@ -14,6 +11,7 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation  
+
 
 def grid_flight_dat(cesm: xr.open_dataset, cesm_dat: xr.open_dataset, df: pd.DataFrame, air: xr.open_dataset) -> dict:    
     """
@@ -36,155 +34,51 @@ def grid_flight_dat(cesm: xr.open_dataset, cesm_dat: xr.open_dataset, df: pd.Dat
             - A 3D numpy array representing the grid.
             - A dictionary containing latitude, longitude, and altitude bounds.
     """
+    lat_var = next((var for var in df.columns if 'LAT' in var), None)
+    lon_var = next((var for var in df.columns if 'LON' in var), None)
+    alt_var = next((var for var in df.columns if 'ALT' in var or 'PSXC' in var), None)
+    df_vars = [col for col in df.columns if col.lower() != 'time']
+    if not lat_var or not lon_var or not alt_var:
+        raise ValueError("Missing essential latitude, longitude, or altitude variables.")
 
-    def make_grid(cesm: xr.open_dataset, air: xr.open_dataset) -> tuple[np.ndarray, dict[str, list[int]]]:
-        """
-        Create a grid restricted to the aircraft flight region based on CESM and flight data.
+    # Step 2: Create a 3D grid based on CESM & flight data
+    def make_grid(cesm, air):
+        lat_bounds = [int(np.abs(cesm.lat - np.min(air[lat_var])).argmin())-1, 
+                      int(np.abs(cesm.lat - np.max(air[lat_var])).argmin())+1]
+        lon_bounds = [int(np.abs(cesm.lon - np.min(air[lon_var])).argmin())-1, 
+                      int(np.abs(cesm.lon - np.max(air[lon_var])).argmin())+1]
+        alt_bounds = [int(np.abs(cesm.lev - np.min(air[alt_var])).argmin())-1, 
+                      int(np.abs(cesm.lev - np.max(air[alt_var])).argmin())+1]
+
+        bounds = {'lat': lat_bounds, 'lon': lon_bounds, 'palt': alt_bounds}
+        grid_shape = (alt_bounds[1] - alt_bounds[0], lat_bounds[1] - lat_bounds[0], lon_bounds[1] - lon_bounds[0])
+        return np.zeros(grid_shape), bounds
+
+    grid, bounds = make_grid(cesm, air)
+
+    # Step 3: Match aircraft times with CESM times
+    da = xr.DataArray(cesm_dat.time, dims="time")
+    cesm_times = pd.to_datetime([pd.Timestamp(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
+                        for dt in da.values])    
+    aircraft_times = pd.to_datetime(df['Time'])
+    # Select model output times that correspond to the flight times. 
+    times = np.array(cesm_times[np.isin(cesm_times, aircraft_times)])
     
-        This function reads latitude, longitude, and optionally altitude bounds from aircraft flight data,
-        and creates a 3D grid over the specified region. The function assumes low-rate (1 Hz) flight 
-        data and standard CESM grid data.
-    
-        :param cesm_dat: A dataset object containing CESM data with attributes like lat, lon, and lev.
-        :param gv_dat: A dataset object containing aircraft data with attributes like LATC and LONC.
-    
-        :return: 
-            - grid: A numpy array representing the grid restricted to the aircraft flight region.
-            - bounds: A dictionary containing the calculated latitude and longitude bounds.
-        """
-        required_cesm_attributes = ['lat', 'lon', 'lev']
-        required_gv_attributes = ['LATC', 'LONC', 'PSXC']
-        
-        for attr in required_cesm_attributes:
-            if not hasattr(cesm, attr):
-                raise ValueError(f"CESM data is missing required attribute: {attr}")
+    # Step 4: Initialize grid arrays
+    mean_lat, mean_lon, mean_alt = np.zeros_like(grid, dtype=float), np.zeros_like(grid, dtype=float), np.zeros_like(grid, dtype=float)
+    mean_values = {var: np.zeros_like(grid, dtype=float) for var in df_vars}
 
-        for attr in required_gv_attributes:
-            if not hasattr(air, attr):
-                raise ValueError(f"Flight data is missing required attribute: {attr}")
-
-        try:
-            lat_upr_bnd = int(np.abs(cesm.lat - np.max(air.LATC)).argmin())
-            lat_lwr_bnd = int(np.abs(cesm.lat - np.min(air.LATC)).argmin())
-            lon_upr_bnd = int(np.abs(cesm.lon - np.max(air.LONC)).argmin())
-            lon_lwr_bnd = int(np.abs(cesm.lon - np.min(air.LONC)).argmin())
-            alt_upr_bnd = int(np.abs(cesm.lev - np.min(air.PSXC)).argmin())
-            alt_lwr_bnd = int(np.abs(cesm.lev - np.max(air.PSXC)).argmin())
-        except Exception as e:
-            raise ValueError(f"Error calculating bounds: {e}")
-
-        bounds = {
-            'lat': [lat_lwr_bnd-1, lat_upr_bnd+1],
-            'lon': [lon_lwr_bnd-1, lon_upr_bnd+1],
-            'palt': [alt_upr_bnd-1, alt_lwr_bnd+1]
-        }
-
-        grid_shape = (
-            (alt_lwr_bnd+1 - alt_upr_bnd+1), 
-            (lat_upr_bnd+1 - lat_lwr_bnd+1), 
-            (lon_upr_bnd+1 - lon_lwr_bnd+1)
-        )
-        grid = np.zeros(grid_shape, dtype=int)
-        return grid, bounds
-    
-    grid, bounds = make_grid(cesm,air)
-
-    def filt_model_dims(cesm_dat: xr.open_dataset,df: pd.DataFrame):
-        """
-        Returns the lat, lon, and time from the nudged file that occur during specific research flight
-        
-        This function maps aircraft data onto a predefined grid based on CESM data
-        
-        NOTE: A low-rate, 1 Hz, flight data file is assumed.
-        
-        :param gv_dat: A dataset object containing aircraft data (e.g., LATC, LONC, U, V, T).
-        :param cesm_dat: A dataset object containing CESM data (e.g., lat, lon, lev).
-        
-        :return: A dictionary containing latitude (lats), longitude (lons), and time 
-                 for grid cells where data is present.
-        """
-        da = xr.DataArray(cesm_dat.time, dims="time")
-        cesm_times = pd.to_datetime([pd.Timestamp(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
-                            for dt in da.values])
-        
-        aircraft_times = df.Time
-        
-        matching_indices = cesm_times.isin(aircraft_times)
-        # Assuming cesm_dat.lat and matching_indices are already defined
-        # Create a boolean mask for lat values you want to exclude
-        lat = np.array(cesm_dat.lat[matching_indices])  # This gives the full lat array
-        lon = np.array(cesm_dat.lon[matching_indices])  # This gives the full lat array
-        time = np.array(cesm_times[matching_indices])  # This gives the full lat array
-        
-        # Define a threshold for what is considered a "high" difference
-        lat_threshold = 1  # You can adjust this value
-        lon_threshold = 1
-        
-        # Find the indices where the difference exceeds the threshold
-        outlier_indices_lat = np.where(np.abs(np.diff(lat)) > lat_threshold)[0]
-        outlier_indices_lon = np.where(np.abs(np.diff(lon)) > lon_threshold)[0]
-        
-        outliers = np.array([])
-        
-        for i in range(0,len(outlier_indices_lat)-1):
-            if lat[outlier_indices_lat[i+1]] < lat[outlier_indices_lat[i]]:
-                outliers = np.append(outliers, int(outlier_indices_lat[i+1]))
-            elif lat[outlier_indices_lat[i]] < lat[outlier_indices_lat[i+1]]:
-                outliers = np.append(outliers, int(outlier_indices_lat[i]))
-                
-        for i in range(0,len(outlier_indices_lon)-1):
-            if lon[outlier_indices_lon[i+1]] < lon[outlier_indices_lon[i]]:
-                outliers = np.append(outliers, int(outlier_indices_lon[i+1]))
-            elif lon[outlier_indices_lon[i+1]] > lon[outlier_indices_lon[i]]:
-                outliers = np.append(outliers, int(outlier_indices_lon[i]))
-        # print(outliers)      
-        # Create the exclude_mask, same length as lat, initially filled with False
-        exclude_mask = np.zeros_like(lat, dtype=bool)  # Shape matches lat
-        
-        # # Set the outlier indices to True in the exclude_mask
-        exclude_mask[outliers.astype(int)] = True  # Mark outliers as True, which will exclude them
-        
-        final_mask = ~exclude_mask
-        
-        # check if there are any remaining outliers, usually at the beginning of the array where there's two consecutive outliers
-        lat_check = lat[final_mask]
-        outlier_indices_lat = np.where(np.abs(np.diff(lat_check)) > lat_threshold)[0]
-        if len(outlier_indices_lat) > 0:
-            outliers = np.concatenate((outlier_indices_lat, outliers))
-            # # Set the outlier indices to True in the exclude_mask
-            exclude_mask[outliers.astype(int)] = True  # Mark outliers as True, which will exclude them
-        
-            final_mask = ~exclude_mask
-        
-        filter_cesm_dims = {'lat': lat[final_mask],
-                            'lon': lon[final_mask],
-                            'time': time[final_mask]
-                           }
-        
-        return filter_cesm_dims
-
-    filter_cesm_dims = filt_model_dims(cesm_dat, df)
-
-    mean_u = np.zeros_like(grid, dtype=float)
-    mean_v = np.zeros_like(grid, dtype=float)
-    mean_t = np.zeros_like(grid, dtype=float)
-    mean_lat = np.zeros_like(grid, dtype=float)
-    mean_lon = np.zeros_like(grid, dtype=float)
-    mean_alt = np.zeros_like(grid, dtype=float)
-        
     # Generate latitude, longitude, and altitude grid values
     lats = np.array(cesm.lat[bounds['lat'][0]:bounds['lat'][1]+1])
     lons = np.array(cesm.lon[bounds['lon'][0]:bounds['lon'][1]+1])
     alts = np.array(cesm.lev[bounds['palt'][0]:bounds['palt'][1]+1])
     alts = alts[::-1]
-    times = filter_cesm_dims['time']
     # Add 30 minutes
     new_time = times[-1] + np.timedelta64(30, 'm')
     minus_time = times[0] - np.timedelta64(30,'m')
     # Append new value
     times = np.append(times, new_time)
     times = np.append(minus_time, times)
-
     mid_time = []
     for t in range(0,len(times)-1):
     
@@ -192,112 +86,104 @@ def grid_flight_dat(cesm: xr.open_dataset, cesm_dat: xr.open_dataset, df: pd.Dat
         # Select aircraft data between time intervals
         air_time_indices = (df['Time'] > times[t]) & (df['Time'] <= times[t+1]) 
         sliced_df_time = df[air_time_indices]
-    
         if not sliced_df_time.empty:
                 # Digitize lat, lon, and alt into grid bins
-                lat_bins = np.digitize(sliced_df_time['LATC'], lats) - 1
-                lon_bins = np.digitize(sliced_df_time['LONC'], lons) - 1
+                lat_bins = np.digitize(sliced_df_time['GGLAT'], lats) - 1
+                lon_bins = np.digitize(sliced_df_time['GGLON'], lons) - 1
                 alt_bins = np.digitize(sliced_df_time['PSXC'], alts) - 1  # Reverse alt indexing
                 # Ensure valid indices
                 valid_mask = (lat_bins >= 0) & (lat_bins < len(lats) - 1) & \
                              (lon_bins >= 0) & (lon_bins < len(lons) - 1) & \
                              (alt_bins >= 0) & (alt_bins < len(alts) - 1)
-            
+
                 if valid_mask.any():
                     # Filter valid rows
                     sliced_df = sliced_df_time.loc[valid_mask].copy()
                     sliced_df['lat_bin'] = lat_bins[valid_mask]
                     sliced_df['lon_bin'] = lon_bins[valid_mask]
                     sliced_df['alt_bin'] = alt_bins[valid_mask]
-
+    
                     # Group by grid cells and compute means                
                     grouped = sliced_df.groupby(['alt_bin', 'lat_bin', 'lon_bin'])
+                    
+                    for var in df_vars:
+                        mean_values[var][tuple(zip(*grouped[var].mean().index.to_numpy()))] = grouped[var].mean().values
+    
+                    mean_lat[tuple(zip(*grouped[lat_var].mean().index.to_numpy()))] = grouped[lat_var].mean().values
+                    mean_lon[tuple(zip(*grouped[lon_var].mean().index.to_numpy()))] = grouped[lon_var].mean().values
+                    mean_alt[tuple(zip(*grouped[alt_var].mean().index.to_numpy()))] = grouped[alt_var].mean().values
 
-                    # print(grouped)
-                    # print(grouped)
-                    mean_u_vals = grouped['UIC'].mean()
-                    mean_v_vals = grouped['VIC'].mean()
-                    mean_t_vals = grouped['ATX'].mean()
-                    mean_lat_vals = grouped['LATC'].mean()
-                    mean_lon_vals = grouped['LONC'].mean()
-                    mean_alt_vals = grouped['PSXC'].mean()
-    
-                    # Assign values to the grid
-                    indices = tuple(zip(*mean_u_vals.index.to_numpy()))  # Unpack MultiIndex correctly
-                    mean_u[indices] = mean_u_vals.values
-                    mean_v[indices] = mean_v_vals.values
-                    mean_t[indices] = mean_t_vals.values
-                    mean_lat[indices] = mean_lat_vals.values
-                    mean_lon[indices] = mean_lon_vals.values
-                    mean_alt[indices] = mean_alt_vals.values
-    
                     # Compute mid-time for each grid cell
                     grouped_times = grouped['Time'].agg(lambda x: x.min() + (x.max() - x.min()) / 2)
                     mid_time.extend(grouped_times.values)
+                    # Convert mid_time to a NumPy array
     
-        indices = np.argwhere(mean_t != 0)
-        
-        # Identify grid cells with non-zero data
-        valid_indices = np.argwhere(mean_t != 0)
-        alt_indices, lat_indices, lon_indices = valid_indices[:, 0], valid_indices[:, 1], valid_indices[:, 2]
-    
-        # # Calculate the center values of latitude, longitude, and altitude for each grid cell
-        # selected_lats = (lats[lat_indices] + lats[lat_indices + 1]) / 2
-        # selected_lons = (lons[lon_indices] + lons[lon_indices + 1]) / 2
-        # selected_alts = (alts[alt_indices] + alts[alt_indices + 1]) / 2
-        
-        grid_dict = {'Time': mid_time,
-                     'lats': mean_lat[mean_t !=0],
-                     'lons': mean_lon[mean_t !=0],
-                     'palts': mean_alt[mean_t !=0],
-                     'mean_u': mean_u[mean_t !=0],
-                     'mean_v': mean_v[mean_t !=0],
-                     'mean_t': mean_t[mean_t !=0],
-                    }
-        
+    # Conver time to numpy array
+    mid_time = np.array(mid_time, dtype='datetime64[ns]')
+    # There should always be temperature data, so use it to remove grids that do not have data
+    mean_t = mean_values['ATX']
+    valid_indices = np.argwhere(mean_t != 0)  # Gives (N, 3) array of (alt, lat, lon)
+    selected_time = mid_time[:len(valid_indices)]
+    # Identify grid cells with non-zero data
+    alt_indices, lat_indices, lon_indices = valid_indices[:, 0], valid_indices[:, 1], valid_indices[:, 2]
+    selected_time = mid_time[:len(valid_indices)]
+
+    grid_dict = {
+        'Time': selected_time,
+        'Latitude': mean_lat[mean_t != 0],
+        'Longitude': mean_lon[mean_t != 0],
+        'Altitude': mean_alt[mean_t != 0],
+    }
+    grid_dict.update({var: mean_values[var][mean_t != 0] for var in df_vars})
+ 
+        # Confirm the dictionary has data
+    if all(len(v) > 0 for v in grid_dict.values()):
+        print("✅ Grid dictionary successfully populated with data!")
+    else:
+        print("⚠️ Warning: Some entries in grid_dict are empty!")
+           
+    def plot_grid(free,bounds,air_nc):
+
+        # Define the lat/lon boundaries of the square
+        lat_min, lat_max = float(free.lat[bounds['lat'][0]-1]), float(free.lat[bounds['lat'][1]+2])  # Latitude range
+        lon_min, lon_max = float(free.lon[bounds['lon'][0]-1]), float(free.lon[bounds['lon'][1]+2])  # Longitude range
+
+        # Create a plot with Cartopy's PlateCarree projection
+        fig, ax = plt.subplots(subplot_kw={'projection': ccrs.PlateCarree()}, figsize=(10, 6))
+
+        # Add global map features
+        ax.add_feature(cfeature.LAND, edgecolor='black', color='lightgray')
+        ax.add_feature(cfeature.BORDERS, linestyle=':')
+        ax.set_global()
+        ax.coastlines()
+
+        # Plot the flight track with proper transformation
+        ax.plot(air_nc.LONC, air_nc.LATC, label='flight track', color='black', transform=ccrs.PlateCarree())
+
+        # Plot the square of coordinates
+        square_lats = [lat_min, lat_min, lat_max, lat_max, lat_min]
+        square_lons = [lon_min, lon_max, lon_max, lon_min, lon_min]
+        ax.plot(square_lons, square_lats, color='red', linewidth=2,label='model domain', transform=ccrs.PlateCarree())
+
+        # Set the extent to zoom in on the region around the square
+        buffer = 45  # Degrees to add around the square for some padding
+        # Ensure that the longitude wrapping is handled correctly
+        lon_min_zoom = max(lon_min - buffer, -180)
+        lon_max_zoom = min(lon_max + buffer, 180)
+
+        # Set the extent for zooming in on the region around the square
+        ax.set_extent([lon_min_zoom, lon_max_zoom, lat_min - buffer, lat_max + buffer], crs=ccrs.PlateCarree())
+
+        # Set title
+        ax.set_title('Map with aircraft grid location')
+        ax.legend()
+        # Show plot
+        plt.show()
+
+    print("Here's the flight track and 2-D grid")
+    plot_grid(cesm,bounds,air)
+
     return grid_dict, grid, bounds
-
-# Assuming grid and bounds are already defined
-
-# grid, bounds = inform_grid_util.grid_flight_dat(cesm_fr, nc)
-def plot_grid(free,bounds,air_nc):
-
-    # Define the lat/lon boundaries of the square
-    lat_min, lat_max = float(free.lat[bounds['lat'][0]-1]), float(free.lat[bounds['lat'][1]+2])  # Latitude range
-    lon_min, lon_max = float(free.lon[bounds['lon'][0]-1]), float(free.lon[bounds['lon'][1]+2])  # Longitude range
-
-    # Create a plot with Cartopy's PlateCarree projection
-    fig, ax = plt.subplots(subplot_kw={'projection': ccrs.PlateCarree()}, figsize=(10, 6))
-
-    # Add global map features
-    ax.add_feature(cfeature.LAND, edgecolor='black', color='lightgray')
-    ax.add_feature(cfeature.BORDERS, linestyle=':')
-    ax.set_global()
-    ax.coastlines()
-
-    # Plot the flight track with proper transformation
-    ax.plot(air_nc.LONC, air_nc.LATC, label='flight track', color='black', transform=ccrs.PlateCarree())
-
-    # Plot the square of coordinates
-    square_lats = [lat_min, lat_min, lat_max, lat_max, lat_min]
-    square_lons = [lon_min, lon_max, lon_max, lon_min, lon_min]
-    ax.plot(square_lons, square_lats, color='red', linewidth=2,label='model domain', transform=ccrs.PlateCarree())
-
-    # Set the extent to zoom in on the region around the square
-    buffer = 45  # Degrees to add around the square for some padding
-    # Ensure that the longitude wrapping is handled correctly
-    lon_min_zoom = max(lon_min - buffer, -180)
-    lon_max_zoom = min(lon_max + buffer, 180)
-
-    # Set the extent for zooming in on the region around the square
-    ax.set_extent([lon_min_zoom, lon_max_zoom, lat_min - buffer, lat_max + buffer], crs=ccrs.PlateCarree())
-
-    # Set title
-    ax.set_title('Map with aircraft grid location')
-    ax.legend()
-    # Show plot
-    plt.show()
-
 
 def plot_3d_track(grid_data,air_nc):
     # grid_data = grid_flight_dat(cesm_fr, cesm_ndg, df, nc)
@@ -307,7 +193,7 @@ def plot_3d_track(grid_data,air_nc):
     ax = fig.add_subplot(111, projection='3d')
 
     # Scatter plot
-    sc = ax.scatter(grid_data['lons'], grid_data['lats'], grid_data['palts'], c=grid_data['mean_t'], cmap='viridis', marker='^',label='grid-mean values',s=100)
+    sc = ax.scatter(grid_data['GGLON'], grid_data['GGLAT'], grid_data['PSXC'], c=grid_data['ATX'], cmap='viridis', marker='^',label='grid-mean values',s=100)
     # Invert the Z-axis
     ax.scatter(air_nc.LONC, air_nc.LATC, air_nc.PSXC, c=air_nc.ATX, label='3D Flight track',s=12)
     ax.invert_zaxis()
@@ -332,3 +218,23 @@ def plot_3d_track(grid_data,air_nc):
     HTML(ani.to_jshtml())
 
     plt.show()
+
+def write_nc(grid_data, filename="test_grid_data.nc"):
+    """
+    Automatically creates and saves a NetCDF file from the given grid data dictionary.
+    
+    :param grid_data: Dictionary containing time series data with "Time" and corresponding variables.
+    :param filename: Name of the NetCDF file to be saved.
+    """
+
+    # Extract headers dynamically (excluding "Time")
+    headers = [key for key in grid_data.keys() if key.lower() != "time"]
+
+    # Create the xarray dataset dynamically
+    ds = xr.Dataset(
+        {var: (["time"], grid_data[var]) for var in headers},  # Assign all variables dynamically
+        coords={"time": grid_data["Time"]},  # Set "Time" as the coordinate
+    )
+    # # Save to a NetCDF file
+    ds.to_netcdf("test_grid_data.nc")
+    print("NetCDF file 'grid_data.nc' saved successfully!")
