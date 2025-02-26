@@ -12,22 +12,7 @@ from matplotlib.animation import FuncAnimation
 
 
 def grid_flight(cesm: xr.open_dataset, cesm_dat: xr.open_dataset, df: pd.DataFrame) -> dict:    
-    """
-    Grids aircraft data and scales it onto a 3D grid.
-
-    This function maps aircraft data onto a predefined grid based on CESM data,
-    using the region defined by the bounds of the flight data.
-
-    NOTE: A low-rate, 1 Hz, flight data file is assumed.
-
-    :param gv_dat: A dataset object containing aircraft data (e.g., LATC, LONC, U, V, T).
-    :param cesm_dat: A dataset object containing CESM data (e.g., lat, lon, lev).
-    :param grid: A 3D numpy array representing the grid, typically created based on flight region.
-    :param bounds: A dictionary containing the latitude, longitude, and altitude bounds for the grid.
-
-    :return: A dictionary containing latitude (lats), longitude (lons), and pressure altitude (palts)
-            for grid cells where data is present.
-    """
+    
     # Step 1: Identify Variables Automatically
     lat_var = next((var for var in df.columns if 'GGLAT' in var), None)
     lon_var = next((var for var in df.columns if 'GGLON' in var), None)
@@ -49,18 +34,19 @@ def grid_flight(cesm: xr.open_dataset, cesm_dat: xr.open_dataset, df: pd.DataFra
         raise ValueError("Missing essential latitude, longitude, or altitude variables.")
     
     # Step 2: Create a 3D grid based on CESM & flight data
-    # Compute midpoints
-    lat_mp = (cesm.lat[:-1] + cesm.lat[1:]) / 2
-    lon_mp = (cesm.lon[:-1] + cesm.lon[1:]) / 2
     # Find lat & lon bounds based on aircraft min/max values
-    lat_bounds = [int(np.abs(lat_mp - np.min(df[lat_var])).argmin()) - 1, 
-                  int(np.abs(lat_mp - np.max(df[lat_var])).argmin()) + 1]
-    lon_bounds = [int(np.abs(lon_mp - np.min(df[lon_var])).argmin()) - 1, 
-                  int(np.abs(lon_mp - np.max(df[lon_var])).argmin()) + 1]
+    lat_bounds = [int(np.abs(cesm.lat - np.min(df[lat_var])).argmin()) - 1, 
+                  int(np.abs(cesm.lat - np.max(df[lat_var])).argmin()) + 1]
+    lon_bounds = [int(np.abs(cesm.lon - np.min(df[lon_var])).argmin()) - 1, 
+                  int(np.abs(cesm.lon - np.max(df[lon_var])).argmin()) + 1]
+
+    model_lat = cesm.lat
+    print(model_lat)
+    model_lon = cesm.lon
 
     # Ensure bounds are within valid range
-    lat_bounds = [max(0, lat_bounds[0]), min(len(lat_mp) - 1, lat_bounds[1])]
-    lon_bounds = [max(0, lon_bounds[0]), min(len(lon_mp) - 1, lon_bounds[1])]
+    lat_bounds = [max(0, lat_bounds[0]), min(len(cesm.lat) - 1, lat_bounds[1])]
+    lon_bounds = [max(0, lon_bounds[0]), min(len(cesm.lon) - 1, lon_bounds[1])]
     
     # Select the subset of `palt` corresponding to the lat/lon bounds
     palt_subset = palt.isel(lat=slice(lat_bounds[0], lat_bounds[1] + 1),
@@ -112,8 +98,8 @@ def grid_flight(cesm: xr.open_dataset, cesm_dat: xr.open_dataset, df: pd.DataFra
     mean_lat, mean_lon, mean_alt = np.zeros_like(grid, dtype=float), np.zeros_like(grid, dtype=float), np.zeros_like(grid, dtype=float)
     
     # Generate latitude, longitude grid values
-    lats = np.array(lat_mp[bounds['lat'][0]:bounds['lat'][1] + 1])
-    lons = np.array(lon_mp[bounds['lon'][0]:bounds['lon'][1] + 1])
+    lats = np.array(cesm.lat[bounds['lat'][0]:bounds['lat'][1] + 1])
+    lons = np.array(cesm.lon[bounds['lon'][0]:bounds['lon'][1] + 1])
     
     # Select the region of interest in `palt`
     palt_subset = palt.sel(lat=slice(lats.min(), lats.max()), lon=slice(lons.min(), lons.max()))
